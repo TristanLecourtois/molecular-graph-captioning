@@ -99,49 +99,30 @@ def load_descriptions_from_graphs(graph_path: str) -> Dict[str, str]:
 # Dataset that loads preprocessed graphs and text embeddings
 # =========================================================
 class PreprocessedGraphDataset(Dataset):
-    """
-    Dataset that loads pre-saved molecule graphs with optional text embeddings.
-    
-    Args:
-        graph_path: Path to .pkl file containing list of pre-saved graphs
-        emb_dict: Dictionary mapping ID to text embedding tensors (optional)
-    """
-    def __init__(self, graph_path: str, emb_dict: Dict[str, torch.Tensor] = None):
-        print(f"Loading graphs from: {graph_path}")
-        with open(graph_path, 'rb') as f:
+    def __init__(self, pkl_file, id2emb=None):
+        with open(pkl_file, "rb") as f:
             self.graphs = pickle.load(f)
-        self.emb_dict = emb_dict
-        self.ids = [g.id for g in self.graphs]
-        print(f"Loaded {len(self.graphs)} graphs")
+        self.id2emb = id2emb
 
     def __len__(self):
         return len(self.graphs)
 
     def __getitem__(self, idx):
-        graph = self.graphs[idx]
-        if self.emb_dict is not None:
-            id_ = graph.id
-            text_emb = self.emb_dict[id_]
-            return graph, text_emb
-        else:
-            return graph
-
+        g = self.graphs[idx]
+        if self.id2emb is not None:
+            emb = self.id2emb[int(g.id)]
+            return g, emb
+        return g
 
 def collate_fn(batch):
-    """
-    Collate function for DataLoader to batch graphs with optional text embeddings.
-    
-    Args:
-        batch: List of graph Data objects or (graph, text_embedding) tuples
-        
-    Returns:
-        Batched graph or (batched_graph, stacked_text_embeddings)
-    """
-    if isinstance(batch[0], tuple):
-        graphs, text_embs = zip(*batch)
-        batch_graph = Batch.from_data_list(list(graphs))
-        text_embs = torch.stack(text_embs, dim=0)
-        return batch_graph, text_embs
-    else:
-        return Batch.from_data_list(batch)
+    graphs, embs = zip(*batch)
+    return Batch.from_data_list(graphs), torch.stack(embs)
+
+def load_id2emb(csv_file):
+    df = pd.read_csv(csv_file)
+    id2emb = {}
+    for _, row in df.iterrows():
+        emb = torch.tensor([float(x) for x in row['embedding'].split(",")], dtype=torch.float32)
+        id2emb[int(row['ID'])] = emb
+    return id2emb
 

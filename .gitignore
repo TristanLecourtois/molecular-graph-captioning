@@ -10,6 +10,7 @@ venv/
 .venv/
 
 *.pkl
+*.csv
 *.pt
 *.ckpt
 *.h5

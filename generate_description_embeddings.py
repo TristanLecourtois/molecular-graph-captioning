@@ -1,64 +1,77 @@
-#!/usr/bin/env python3
-"""Generate BERT embeddings for molecular descriptions."""
-
+import os
 import pickle
 import pandas as pd
 import torch
-from transformers import AutoTokenizer, AutoModel
-from tqdm import tqdm
+import torch.nn.functional as F
+from sentence_transformers import SentenceTransformer
 
-# Configuration
-MAX_TOKEN_LENGTH = 128
+BASE_PATH = "."
+MODEL_A = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_B = "sentence-transformers/all-mpnet-base-v2"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Load BERT model
-print("Loading BERT model...")
-tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-model = AutoModel.from_pretrained('bert-base-uncased')
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = model.to(device)
-model.eval()
-print(f"Model loaded on: {device}")
+print(f"Using device: {DEVICE}")
+print("Loading SentenceBERT models...")
+model_a = SentenceTransformer(MODEL_A, device=DEVICE)
+model_b = SentenceTransformer(MODEL_B, device=DEVICE)
+print("Models loaded.")
 
-# Process each split
-for split in ['train', 'validation']:
-    print(f"\nProcessing {split}...")
+def enrich_description(graph):
+    """Ajoute des informations structurelles à la description texte."""
+    desc = graph.description
+    extras = []
+    if graph.num_nodes > 50:
+        extras.append("large molecule")
+    else:
+        extras.append("small molecule")
+        
+    if graph.edge_index.size(1) / graph.num_nodes > 1.5:
+        extras.append("dense bonds")
+        
+    extra = " [Molecule info] " + " ".join(extras)
+    return desc + extra
+
+def generate_text_embeddings(split="train"):
+    """Génère et sauvegarde les embeddings concaténés MiniLM + MPNet."""
+    pkl_path = os.path.join(BASE_PATH, "data", f"{split}_graphs.pkl")
     
-    # Load graphs from pkl file
-    pkl_path = f'data/{split}_graphs.pkl'
-    print(f"Loading from {pkl_path}...")
-    with open(pkl_path, 'rb') as f:
+    if not os.path.exists(pkl_path):
+        print(f"Erreur : Le fichier {pkl_path} est introuvable.")
+        return
+
+    with open(pkl_path, "rb") as f:
         graphs = pickle.load(f)
-    print(f"Loaded {len(graphs)} graphs")
-    
-    # Generate embeddings
-    ids = []
-    embeddings = []
-    
-    for graph in tqdm(graphs, total=len(graphs)):
-        # Get description from graph
-        description = graph.description
-        
-        # Tokenize
-        inputs = tokenizer(description, return_tensors='pt', 
-                          truncation=True, max_length=MAX_TOKEN_LENGTH, padding=True)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        
-        # Get embedding
-        with torch.no_grad():
-            outputs = model(**inputs)
-        embedding = outputs.last_hidden_state[:, 0, :].cpu().numpy().flatten()
-        
-        ids.append(graph.id)
-        embeddings.append(embedding)
-    
-    # Save to CSV
-    result = pd.DataFrame({
-        'ID': ids,
-        'embedding': [','.join(map(str, emb)) for emb in embeddings]
+    print(f"Loaded {len(graphs)} graphs for {split}")
+
+    descriptions = [enrich_description(g) for g in graphs]
+    ids = [g.id for g in graphs]
+
+    print(f"Encoding {split} with MiniLM...")
+    emb_a = model_a.encode(descriptions, batch_size=64, convert_to_numpy=True, 
+                           normalize_embeddings=True, show_progress_bar=True)
+
+    print(f"Encoding {split} with MPNet...")
+    emb_b = model_b.encode(descriptions, batch_size=32, convert_to_numpy=True, 
+                           normalize_embeddings=True, show_progress_bar=True)
+    emb_a = torch.from_numpy(emb_a)
+    emb_b = torch.from_numpy(emb_b)
+    embeddings = torch.cat([emb_a, emb_b], dim=1)
+    embeddings = F.normalize(embeddings, dim=-1).numpy()
+
+   
+    df = pd.DataFrame({
+        "ID": ids,
+        "embedding": [",".join(map(str, e)) for e in embeddings]
     })
-    output_path = f'data/{split}_embeddings.csv'
-    result.to_csv(output_path, index=False)
-    print(f"Saved to {output_path}")
+    
+    output_dir = os.path.join(BASE_PATH, "data")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        
+    output_path = os.path.join(output_dir, f"{split}_embeddings.csv")
+    df.to_csv(output_path, index=False)
+    print(f"Saved embeddings to {output_path}")
 
-print("\nDone!")
-
+if __name__ == "__main__":
+    generate_text_embeddings("train")
+    generate_text_embeddings("validation")
